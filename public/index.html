@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <title>Photo & Note Manager</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 30px; background-color: #f4f6f8; color: #333; }
+    h1 { color: #1a73e8; margin-bottom: 5px; }
+    .badge { display: inline-block; background: #e8f0fe; color: #1967d2; padding: 4px 10px; border-radius: 12px; font-size: 0.85em; margin-bottom: 15px; font-weight: bold; }
+    .container { display: flex; gap: 20px; flex-wrap: wrap; }
+    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); width: 45%; min-width: 300px; }
+    .form-group { margin-bottom: 15px; }
+    input[type="text"], input[type="file"] { width: 100%; padding: 8px; margin-top: 5px; box-sizing: border-box; }
+    button { background: #1a73e8; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; margin-top: 5px; }
+    button:hover { background: #1557b0; }
+    ul { list-style-type: none; padding: 0; }
+    li { background: #f9f9f9; margin-bottom: 8px; padding: 10px; border-radius: 4px; border-right: 4px solid #1a73e8; }
+    .gallery { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
+    .img-card { border: 1px solid #ddd; padding: 5px; background: #fff; border-radius: 4px; text-align: center; }
+    .img-card img { width: 100px; height: 100px; object-fit: cover; display: block; margin-bottom: 5px; }
+  </style>
+</head>
+<body>
+  <h1>📸 Photo & Note Manager</h1>
+  <div class="badge" id="serverInfo">טוען נתוני שרת...</div>
+  <hr>
+
+  <div class="container">
+    <!-- ניהול הערות -->
+    <div class="card">
+      <h2>הערות (SQLite)</h2>
+      <div class="form-group">
+        <input type="text" id="noteInput" placeholder="כתוב הערה חדשה...">
+      </div>
+      <button onclick="addNote()">הוסף הערה</button>
+      <ul id="notesList"></ul>
+    </div>
+
+    <!-- העלאת תמונות -->
+    <div class="card">
+      <h2>העלאת תמונות (Local Storage + Sharp)</h2>
+      <div class="form-group">
+        <input type="file" id="imageInput" accept="image/*">
+      </div>
+      <button onclick="uploadImage()">העלה תמונה</button>
+      <h3>גלריה:</h3>
+      <div class="gallery" id="gallery"></div>
+    </div>
+  </div>
+
+  <script>
+    async function fetchInfo() {
+      try {
+        const res = await fetch('/api/info');
+        const data = await res.json();
+        document.getElementById('serverInfo').innerText = 
+          `Env: ${data.environment} | Host/Pod: ${data.instanceId}`;
+      } catch (e) {
+        document.getElementById('serverInfo').innerText = 'נכשל בטעינת נתוני שרת';
+      }
+    }
+
+    async function fetchNotes() {
+      const res = await fetch('/api/notes');
+      const notes = await res.json();
+      const list = document.getElementById('notesList');
+      list.innerHTML = notes.map(n => `<li>${n.content}</li>`).join('');
+    }
+
+    async function fetchImages() {
+      const res = await fetch('/api/images');
+      const images = await res.json();
+      const gallery = document.getElementById('gallery');
+      gallery.innerHTML = images.map(img => `
+        <div class="img-card">
+          <a href="${img.image}" target="_blank">
+            <img src="${img.thumbnail}" alt="thumb">
+          </a>
+          <small>${img.filename.substring(0, 15)}...</small>
+        </div>
+      `).join('');
+    }
+
+    async function addNote() {
+      const input = document.getElementById('noteInput');
+      if (!input.value) return;
+      await fetch('/api/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: input.value })
+      });
+      input.value = '';
+      fetchNotes();
+    }
+
+    async function uploadImage() {
+      const input = document.getElementById('imageInput');
+      if (!input.files[0]) return;
+      const formData = new FormData();
+      formData.append('image', input.files[0]);
+      await fetch('/api/upload', {
+        method: 'POST',
+        body: formData
+      });
+      input.value = '';
+      fetchImages();
+    }
+
+    fetchInfo();
+    fetchNotes();
+    fetchImages();
+  </script>
+</body>
+</html>
