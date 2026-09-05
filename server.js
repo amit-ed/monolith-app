@@ -1,6 +1,6 @@
 const express = require('express');
 const multer = require('multer');
-const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg');
 const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
@@ -9,79 +9,105 @@ const config = require('./config');
 const app = express();
 app.use(express.json());
 
-// יצירת תיקיות במידה ולא קיימות לפי הקונפיגורציה
-const { dataDir, uploadDir, thumbDir, publicDir } = config.paths;
-
-[uploadDir, thumbDir, dataDir, publicDir].forEach(dir => {
+// יצירת תיקיות תמונות במידה ולא קיימות
+const { uploadDir, thumbDir, publicDir } = config.paths;
+[uploadDir, thumbDir, publicDir].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
-// הגדרת SQLite מקומי
-const dbPath = path.join(dataDir, 'app.db');
-const db = new sqlite3.Database(dbPath);
-db.serialize(() => {
-  db.run("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT)");
-  db.run("CREATE TABLE IF NOT EXISTS images (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, thumb_filename TEXT)");
-});
+// התחברות ל-PostgreSQL דרך Connection Pool
+const pool = new Pool(config.db);
 
-// הגדרת Multer לשמירת קבצים בדיסק המקומי
+// איתחול טבלאות ב-PostgreSQL
+async function initDb() {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS notes (
+        id SERIAL PRIMARY KEY,
+        content TEXT NOT NULL
+      );
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS images (
+        id SERIAL PRIMARY KEY,
+        filename TEXT NOT NULL,
+        thumb_filename TEXT NOT NULL
+      );
+    `);
+    console.log('PostgreSQL tables initialized successfully.');
+  } catch (err) {
+    console.error('Error initializing PostgreSQL tables:', err);
+  } finally {
+    client.release();
+  }
+}
+initDb();
+
+// הגדרת Multer לשמירת קבצים בדיסק המקומי (שמחובר ל-Shared Volume)
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
 });
 const upload = multer({ storage });
 
-// הגשת קבצים סטטיים: Frontend מהתיקייה public ותמונות מהתיקייה uploads
 app.use(express.static(publicDir));
 app.use('/uploads', express.static(uploadDir));
 
 // -------------------------------------------------------------
-// API Endpoints
+// API Endpoints (מבוססי PostgreSQL)
 // -------------------------------------------------------------
 
-// API: קבלת Metadata של השרת מתוך קובץ הקונפיגורציה
 app.get('/api/info', (req, res) => {
   res.json({
     environment: config.env,
     instanceId: config.instanceId,
-    dataDir: config.paths.dataDir,
-    uploadDir: config.paths.uploadDir
+    dbHost: config.db.host
   });
 });
 
-// API: קבלת כל ההערות
-app.get('/api/notes', (req, res) => {
-  db.all("SELECT * FROM notes ORDER BY id DESC", [], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
+// קבלת הערות
+app.get('/api/notes', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM notes ORDER BY id DESC');
     res.json(rows);
-  });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// API: שמירת הערה ב-DB המקומי
-app.post('/api/notes', (req, res) => {
+// הוספת הערה
+app.post('/api/notes', async (req, res) => {
   const { content } = req.body;
   if (!content) return res.status(400).json({ error: 'Content is required' });
 
-  db.run("INSERT INTO notes (content) VALUES (?)", [content], function(err) {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ id: this.lastID, content });
-  });
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO notes (content) VALUES ($1) RETURNING *',
+      [content]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// API: קבלת כל התמונות
-app.get('/api/images', (req, res) => {
-  db.all("SELECT * FROM images ORDER BY id DESC", [], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
+// קבלת תמונות
+app.get('/api/images', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM images ORDER BY id DESC');
     res.json(rows.map(img => ({
       id: img.id,
       filename: img.filename,
       image: `/uploads/${img.filename}`,
       thumbnail: `/uploads/thumbs/${img.thumb_filename}`
     })));
-  });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// API: העלאת תמונה + עיבוד Synchronous ברקע
+// העלאת תמונה
 app.post('/api/upload', upload.single('image'), async (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
 
@@ -93,19 +119,19 @@ app.post('/api/upload', upload.single('image'), async (req, res) => {
       .resize(100, 100)
       .toFile(thumbPath);
 
-    db.run("INSERT INTO images (filename, thumb_filename) VALUES (?, ?)", 
-      [req.file.filename, thumbFilename], 
-      function(err) {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ 
-          id: this.lastID, 
-          image: `/uploads/${req.file.filename}`, 
-          thumbnail: `/uploads/thumbs/${thumbFilename}` 
-        });
-      }
+    const { rows } = await pool.query(
+      'INSERT INTO images (filename, thumb_filename) VALUES ($1, $2) RETURNING *',
+      [req.file.filename, thumbFilename]
     );
+
+    res.json({ 
+      id: rows[0].id, 
+      image: `/uploads/${req.file.filename}`, 
+      thumbnail: `/uploads/thumbs/${thumbFilename}` 
+    });
   } catch (err) {
-    res.status(500).json({ error: 'Image processing failed' });
+    console.error(err);
+    res.status(500).json({ error: 'Image processing or DB insert failed' });
   }
 });
 

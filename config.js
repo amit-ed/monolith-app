@@ -1,14 +1,22 @@
+require('dotenv').config();
 const path = require('path');
 const os = require('os');
 
 module.exports = {
   port: process.env.PORT || 3000,
-  env: process.env.APP_ENV || 'Development',
+  env: process.env.APP_ENV || 'Dev',
   instanceId: process.env.POD_NAME || process.env.HOSTNAME || os.hostname(),
   
-  // נתיבי אחסון (קריטי עבור Persistent Volumes ב-K8s)
+  // הגדרות חיבור ל-PostgreSQL
+  db: {
+    host: process.env.DB_HOST || 'postgres',
+    port: process.env.DB_PORT || 5432,
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || 'postgres',
+    database: process.env.DB_NAME || 'appdb'
+  },
+
   paths: {
-    dataDir: process.env.DATA_DIR || path.join(__dirname, 'data'),
     uploadDir: process.env.UPLOAD_DIR || path.join(__dirname, 'uploads'),
     get thumbDir() {
       return path.join(this.uploadDir, 'thumbs');
